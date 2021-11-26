@@ -220,7 +220,7 @@ data ShakeExtras = ShakeExtras
     ,clientCapabilities :: ClientCapabilities
     , hiedb :: HieDb -- ^ Use only to read.
     , hiedbWriter :: HieDbWriter -- ^ use to write
-    , persistentKeys :: Var (HMap.HashMap Key GetStalePersistent)
+    , persistentKeys :: IORef (HMap.HashMap Key GetStalePersistent)
       -- ^ Registery for functions that compute/get "stale" results for the rule
       -- (possibly from disk)
     , vfs :: VFSHandle
@@ -260,7 +260,7 @@ getPluginConfig plugin = do
 addPersistentRule :: IdeRule k v => k -> (NormalizedFilePath -> IdeAction (Maybe (v,PositionDelta,TextDocumentVersion))) -> Rules ()
 addPersistentRule k getVal = do
   ShakeExtras{persistentKeys} <- getShakeExtrasRules
-  void $ liftIO $ modifyVar' persistentKeys $ HMap.insert (Key k) (fmap (fmap (first3 toDyn)) . getVal)
+  void $ liftIO $ atomicModifyIORef'_ persistentKeys $ HMap.insert (Key k) (fmap (fmap (first3 toDyn)) . getVal)
 
 class Typeable a => IsIdeGlobal a where
 
@@ -328,7 +328,7 @@ lastValueIO s@ShakeExtras{positionMapping,persistentKeys,state} k file = do
           | IdeTesting testing <- ideTesting s -- Don't read stale persistent values in tests
           , testing = pure Nothing
           | otherwise = do
-          pmap <- readVar persistentKeys
+          pmap <- readIORef persistentKeys
           mv <- runMaybeT $ do
             liftIO $ Logger.logDebug (logger s) $ T.pack $ "LOOKUP UP PERSISTENT FOR: " ++ show k
             f <- MaybeT $ pure $ HMap.lookup (Key k) pmap
@@ -509,7 +509,7 @@ shakeOpen lspEnv defaultConfig logger debouncer
         positionMapping <- STM.newIO
         knownTargetsVar <- newIORef $ hashed HMap.empty
         let restartShakeSession = shakeRestart ideState
-        persistentKeys <- newVar HMap.empty
+        persistentKeys <- newIORef HMap.empty
         indexPending <- newTVarIO HMap.empty
         indexCompleted <- newTVarIO 0
         indexProgressToken <- newVar Nothing
