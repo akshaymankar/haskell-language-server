@@ -214,7 +214,7 @@ data ShakeExtras = ShakeExtras
     -- | A mapping of module name to known target (or candidate targets, if missing)
     ,knownTargetsVar :: IORef (Hashed KnownTargets)
     -- | A mapping of exported identifiers for local modules. Updated on kick
-    ,exportsMap :: Var ExportsMap
+    ,exportsMap :: IORef ExportsMap
     -- | A work queue for actions added via 'runInShakeSession'
     ,actionQueue :: ActionQueue
     ,clientCapabilities :: ClientCapabilities
@@ -514,12 +514,12 @@ shakeOpen lspEnv defaultConfig logger debouncer
         indexCompleted <- newTVarIO 0
         indexProgressToken <- newVar Nothing
         let hiedbWriter = HieDbWriter{..}
-        exportsMap <- newVar mempty
+        exportsMap <- newIORef mempty
         -- lazily initialize the exports map with the contents of the hiedb
         _ <- async $ do
             logDebug logger "Initializing exports map from hiedb"
             em <- createExportsMapHieDb hiedb
-            modifyVar' exportsMap (<> em)
+            atomicModifyIORef'_ exportsMap (<> em)
             logDebug logger $ "Done initializing exports map from hiedb (" <> pack(show (ExportsMap.size em)) <> ")"
 
         progress <- do
