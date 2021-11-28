@@ -75,8 +75,8 @@ import           System.Info
 import           Control.Applicative                  (Alternative ((<|>)))
 import           Data.Void
 
-import           Control.Concurrent.STM               (atomically)
 import           Control.Concurrent.STM.TQueue
+import           Control.Concurrent.STM.Timed         (atomically)
 import           Data.Foldable                        (for_)
 import qualified Data.HashSet                         as Set
 import           Data.IORef.Extra                     (atomicModifyIORef'_)

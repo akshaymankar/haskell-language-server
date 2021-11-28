@@ -10,7 +10,8 @@ module Development.IDE.Core.FileExists
   )
 where
 
-import           Control.Concurrent.STM                (atomically)
+import           Control.Concurrent.STM.Timed          (atomically,
+                                                        atomicallyNamed)
 import           Control.Exception
 import           Control.Monad.Extra
 import           Control.Monad.IO.Class
@@ -94,7 +95,7 @@ modifyFileExists state changes = do
   -- Masked to ensure that the previous values are flushed together with the map update
   mask $ \_ -> do
     -- update the map
-    void $ atomically $ forM_ changes $ \(f,c) ->
+    void $ atomicallyNamed "modifyFileExists" $ forM_ changes $ \(f,c) ->
         case fromChange c of
             Just c' -> STM.focus (Focus.insert c') f var
             Nothing -> pure ()

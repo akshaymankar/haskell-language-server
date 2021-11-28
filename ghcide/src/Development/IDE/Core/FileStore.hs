@@ -24,8 +24,8 @@ module Development.IDE.Core.FileStore(
     registerFileWatches
     ) where
 
-import           Control.Concurrent.STM                       (atomically)
 import           Control.Concurrent.STM.TQueue                (writeTQueue)
+import           Control.Concurrent.STM.Timed                 (atomically)
 import           Control.Concurrent.Strict
 import           Control.Exception
 import           Control.Monad.Extra

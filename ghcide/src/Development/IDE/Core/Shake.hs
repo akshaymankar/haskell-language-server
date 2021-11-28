@@ -148,6 +148,7 @@ import           GHC.Fingerprint
 import           Language.LSP.Types.Capabilities
 import           OpenTelemetry.Eventlog
 
+import           Control.Concurrent.STM.Timed           (atomicallyNamed)
 import           Control.Exception.Extra                hiding (bracket_)
 import           Data.Aeson                             (toJSON)
 import qualified Data.ByteString.Char8                  as BS8
@@ -336,11 +337,11 @@ lastValueIO s@ShakeExtras{positionMapping,persistentKeys,state} k file = do
             MaybeT $ pure $ (,del,ver) <$> fromDynamic dv
           case mv of
             Nothing -> do
-                void $ atomically $ STM.focus (Focus.alter (alterValue $ Failed True)) (toKey k file) state
+                void $ atomicallyNamed "lastValueIO 1" $ STM.focus (Focus.alter (alterValue $ Failed True)) (toKey k file) state
                 return Nothing
             Just (v,del,ver) -> do
-                void $ atomically $ STM.focus (Focus.alter (alterValue $ Stale (Just del) ver (toDyn v))) (toKey k file) state
-                atomically $ Just . (v,) . addDelta del <$> mappingForVersion positionMapping file ver
+                void $ atomicallyNamed "lastValueIO 2"  $ STM.focus (Focus.alter (alterValue $ Stale (Just del) ver (toDyn v))) (toKey k file) state
+                atomicallyNamed "lastValueIO 3"  $ Just . (v,) . addDelta del <$> mappingForVersion positionMapping file ver
 
         -- We got a new stale value from the persistent rule, insert it in the map without affecting diagnostics
         alterValue new Nothing = Just (ValueWithDiagnostics new mempty) -- If it wasn't in the map, give it empty diagnostics
@@ -350,13 +351,13 @@ lastValueIO s@ShakeExtras{positionMapping,persistentKeys,state} k file = do
           -- Something already succeeded before, leave it alone
           _        -> old
 
-    atomically (STM.lookup (toKey k file) state) >>= \case
+    atomicallyNamed "lastValueIO 4"  (STM.lookup (toKey k file) state) >>= \case
       Nothing -> readPersistent
       Just (ValueWithDiagnostics v _) -> case v of
         Succeeded ver (fromDynamic -> Just v) ->
-            atomically $ Just . (v,) <$> mappingForVersion positionMapping file ver
+            atomicallyNamed "lastValueIO 5"  $ Just . (v,) <$> mappingForVersion positionMapping file ver
         Stale del ver (fromDynamic -> Just v) ->
-            atomically $ Just . (v,) . maybe id addDelta del <$> mappingForVersion positionMapping file ver
+            atomicallyNamed "lastValueIO 6"  $ Just . (v,) . maybe id addDelta del <$> mappingForVersion positionMapping file ver
         Failed p | not p -> readPersistent
         _ -> pure Nothing
 
@@ -423,7 +424,7 @@ setValues :: IdeRule k v
           -> Vector FileDiagnostic
           -> IO ()
 setValues state key file val diags =
-    atomically $ STM.insert (ValueWithDiagnostics (fmap toDyn val) diags) (toKey key file) state
+    atomicallyNamed "setValues" $ STM.insert (ValueWithDiagnostics (fmap toDyn val) diags) (toKey key file) state
 
 
 -- | Delete the value stored for a given ide build key
@@ -434,7 +435,7 @@ deleteValue
   -> NormalizedFilePath
   -> IO ()
 deleteValue ShakeExtras{dirtyKeys, state} key file = do
-    atomically $ STM.delete (toKey key file) state
+    atomicallyNamed "deleteValue" $ STM.delete (toKey key file) state
     atomicModifyIORef_ dirtyKeys $ HSet.insert (toKey key file)
 
 recordDirtyKeys
@@ -457,7 +458,7 @@ getValues ::
   NormalizedFilePath ->
   IO (Maybe (Value v, Vector FileDiagnostic))
 getValues state key file = do
-    atomically (STM.lookup (toKey key file) state) >>= \case
+    atomicallyNamed "getValues" (STM.lookup (toKey key file) state) >>= \case
         Nothing -> pure Nothing
         Just (ValueWithDiagnostics v diagsV) -> do
             let r = fmap (fromJust . fromDynamic @v) v
@@ -620,7 +621,7 @@ shakeRestart IdeState{..} reason acts =
               (stopTime,()) <- duration (cancelShakeSession runner)
               res <- shakeDatabaseProfile shakeDb
               backlog <- readIORef $ dirtyKeys shakeExtras
-              queue <- atomically $ peekInProgress $ actionQueue shakeExtras
+              queue <- atomicallyNamed "actionQueue - peek" $ peekInProgress $ actionQueue shakeExtras
               let profile = case res of
                       Just fp -> ", profile saved at " <> fp
                       _       -> ""
@@ -653,7 +654,7 @@ notifyTestingLogMessage extras msg = do
 shakeEnqueue :: ShakeExtras -> DelayedAction a -> IO (IO a)
 shakeEnqueue ShakeExtras{actionQueue, logger} act = do
     (b, dai) <- instantiateDelayedAction act
-    atomically $ pushQueue dai actionQueue
+    atomicallyNamed "actionQueue - push" $ pushQueue dai actionQueue
     let wait' b =
             waitBarrier b `catches`
               [ Handler(\BlockedIndefinitelyOnMVar ->
@@ -662,7 +663,7 @@ shakeEnqueue ShakeExtras{actionQueue, logger} act = do
               , Handler (\e@AsyncCancelled -> do
                   logPriority logger Debug $ T.pack $ actionName act <> " was cancelled"
 
-                  atomically $ abortQueue dai actionQueue
+                  atomicallyNamed "actionQueue - abort" $ abortQueue dai actionQueue
                   throw e)
               ]
     return (wait' b >>= either throwIO return)
@@ -677,7 +678,7 @@ newSession
     -> IO ShakeSession
 newSession extras@ShakeExtras{..} shakeDb acts reason = do
     IdeOptions{optRunSubset} <- getIdeOptionsIO extras
-    reenqueued <- atomically $ peekInProgress actionQueue
+    reenqueued <- atomicallyNamed "actionQueue - peek" $ peekInProgress actionQueue
     allPendingKeys <-
         if optRunSubset
           then Just <$> readIORef dirtyKeys
@@ -686,14 +687,14 @@ newSession extras@ShakeExtras{..} shakeDb acts reason = do
         -- A daemon-like action used to inject additional work
         -- Runs actions from the work queue sequentially
         pumpActionThread otSpan = do
-            d <- liftIO $ atomically $ popQueue actionQueue
+            d <- liftIO $ atomicallyNamed "action queue - pop" $ popQueue actionQueue
             actionFork (run otSpan d) $ \_ -> pumpActionThread otSpan
 
         -- TODO figure out how to thread the otSpan into defineEarlyCutoff
         run _otSpan d  = do
             start <- liftIO offsetTime
             getAction d
-            liftIO $ atomically $ doneQueue d actionQueue
+            liftIO $ atomicallyNamed "actionQueue - done" $ doneQueue d actionQueue
             runTime <- liftIO start
             let msg = T.pack $ "finish: " ++ actionName d
                             ++ " (took " ++ showDuration runTime ++ ")"
@@ -752,11 +753,11 @@ instantiateDelayedAction (DelayedAction _ s p a) = do
 
 getDiagnostics :: IdeState -> IO [FileDiagnostic]
 getDiagnostics IdeState{shakeExtras = ShakeExtras{diagnostics}} = do
-    atomically $ getAllDiagnostics diagnostics
+    atomicallyNamed "getAllDiagnostics" $ getAllDiagnostics diagnostics
 
 getHiddenDiagnostics :: IdeState -> IO [FileDiagnostic]
 getHiddenDiagnostics IdeState{shakeExtras = ShakeExtras{hiddenDiagnostics}} = do
-    atomically $ getAllDiagnostics hiddenDiagnostics
+    atomicallyNamed "getAllDiagnostics - hidden" $ getAllDiagnostics hiddenDiagnostics
 
 -- | Find and release old keys from the state Hashmap
 --   For the record, there are other state sources that this process does not release:
@@ -780,7 +781,7 @@ garbageCollectKeys label maxAge checkParents agedKeys = do
     start <- liftIO offsetTime
     extras <- getShakeExtras
     let values = state extras
-    (n::Int, garbage) <- liftIO $ atomically $
+    (n::Int, garbage) <- liftIO $ atomicallyNamed "garbage collect" $
         foldM (removeDirtyKey values) (0,[]) agedKeys
     liftIO $ atomicModifyIORef_ (dirtyKeys extras) $ \x ->
         foldl' (flip HSet.insert) x garbage
@@ -1152,13 +1153,13 @@ updateFileDiagnostics fp k ShakeExtras{logger, diagnostics, hiddenDiagnostics, p
         -- published. Otherwise, we might never publish certain diagnostics if
         -- an exception strikes between modifyVar but before
         -- publishDiagnosticsNotification.
-        newDiags <- liftIO $ atomically $ update (map snd currentShown) diagnostics
-        _ <- liftIO $ atomically $ update (map snd currentHidden) hiddenDiagnostics
+        newDiags <- liftIO $ atomicallyNamed "diagnostics - update" $ update (map snd currentShown) diagnostics
+        _ <- liftIO $ atomicallyNamed "diagnostics - hidden" $ update (map snd currentHidden) hiddenDiagnostics
         let uri = filePathToUri' fp
         let delay = if null newDiags then 0.1 else 0
         registerEvent debouncer delay uri $ do
              join $ mask_ $ do
-                 lastPublish <- atomically $ STM.focus (Focus.lookupWithDefault [] <* Focus.insert newDiags) uri publishedDiagnostics
+                 lastPublish <- atomicallyNamed "diagnostics - publish" $ STM.focus (Focus.lookupWithDefault [] <* Focus.insert newDiags) uri publishedDiagnostics
                  let action = when (lastPublish /= newDiags) $ case lspEnv of
                         Nothing -> -- Print an LSP event.
                             logInfo logger $ showDiagnosticsColored $ map (fp,ShowDiag,) newDiags
@@ -1217,7 +1218,7 @@ getAllDiagnostics =
 
 updatePositionMapping :: IdeState -> VersionedTextDocumentIdentifier -> List TextDocumentContentChangeEvent -> IO ()
 updatePositionMapping IdeState{shakeExtras = ShakeExtras{positionMapping}} VersionedTextDocumentIdentifier{..} (List changes) =
-    atomically $ STM.focus (Focus.alter f) uri positionMapping
+    atomicallyNamed "updatePositionMapping" $ STM.focus (Focus.alter f) uri positionMapping
       where
         uri = toNormalizedUri _uri
         f = Just . f' . fromMaybe mempty
