@@ -83,20 +83,18 @@ newInProgress :: IO InProgressState
 newInProgress = InProgressState <$> newTVarIO 0 <*> newTVarIO 0 <*> STM.newIO
 
 recordProgress :: InProgressState -> NormalizedFilePath -> (Int -> Int) -> IO ()
-recordProgress InProgressState{..} file shift = atomicallyNamed "recordProgress" $ do
-    done <- readTVar doneVar
-    todo <- readTVar todoVar
-    (prev, new) <- STM.focus alterPrevAndNew file currentVar
-    let (done',todo') =
-            case (prev,new) of
-                (Nothing,0) -> (done+1, todo+1)
-                (Nothing,_) -> (done,   todo+1)
-                (Just 0, 0) -> (done  , todo)
-                (Just 0, _) -> (done-1, todo)
-                (Just _, 0) -> (done+1, todo)
-                (Just _, _) -> (done  , todo)
-    writeTVar todoVar todo'
-    writeTVar doneVar done'
+recordProgress InProgressState{..} file shift = do
+    (prev, new) <- atomicallyNamed "recordProgress" $ STM.focus alterPrevAndNew file currentVar
+    atomicallyNamed "recordProgress2" $ do
+        done <- readTVar doneVar
+        todo <- readTVar todoVar
+        case (prev,new) of
+            (Nothing,0) -> writeTVar doneVar (done+1) >> writeTVar todoVar (todo+1)
+            (Nothing,_) -> writeTVar todoVar (todo+1)
+            (Just 0, 0) -> pure ()
+            (Just 0, _) -> writeTVar doneVar (done-1)
+            (Just _, 0) -> writeTVar doneVar (done+1)
+            (Just _, _) -> pure()
   where
     alterPrevAndNew = do
         prev <- Focus.lookup
